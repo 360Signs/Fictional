@@ -9,8 +9,29 @@ function person(f){return '<button class="person" data-profile="'+esc(f.id)+'">'
 function download(name,text,type){const url=URL.createObjectURL(new Blob([text],{type})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),30000);}
 function request(req){return new Promise((resolve,reject)=>{req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);});}
 async function openDB(){db=await new Promise((resolve,reject)=>{const req=indexedDB.open('multiverse-arena-v1',1);req.onupgradeneeded=()=>{req.result.createObjectStore('fighters',{keyPath:'id'});req.result.createObjectStore('battles',{keyPath:'id'});};req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error);req.onblocked=()=>toast('Close other Arena tabs to upgrade storage.');});db.onversionchange=()=>db.close();}
-async function load(){const tx=db.transaction(['fighters','battles'],'readonly');[fighters,battles]=await Promise.all([request(tx.objectStore('fighters').getAll()),request(tx.objectStore('battles').getAll())]);battles.sort((a,b)=>a.date.localeCompare(b.date)||a.id.localeCompare(b.id));byId=new Map(fighters.map(f=>[f.id,f]));worker.postMessage({type:'data',fighters,battles});renderHistory();}
-function write(changes){return new Promise((resolve,reject)=>{const tx=db.transaction(['fighters','battles'],'readwrite');tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||Error('Save aborted.'));try{changes(tx);}catch(e){tx.abort();reject(e);}});}
+async function readLocalArchive() {
+  const transaction = db.transaction(['fighters', 'battles'], 'readonly');
+  const [localFighters, localBattles] = await Promise.all([
+    request(transaction.objectStore('fighters').getAll()),
+    request(transaction.objectStore('battles').getAll())
+  ]);
+  return { fighters: localFighters, battles: localBattles };
+}
+
+let loadSequence = 0;
+async function load() {
+  const sequence = ++loadSequence;
+  const accountId = ArenaCloud.user?.id || null;
+  const archive = accountId ? await ArenaCloud.read() : await readLocalArchive();
+  if (sequence !== loadSequence || accountId !== (ArenaCloud.user?.id || null)) return;
+  fighters = archive.fighters;
+  battles = [...archive.battles].sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
+  byId = new Map(fighters.map(fighter => [fighter.id, fighter]));
+  worker.postMessage({ type: 'data', fighters, battles });
+  renderHistory();
+  updateCloudStatus(accountId ? 'Cloud saved · ' + new Date().toLocaleTimeString() : 'Saved on this device');
+}
+function write(changes){if (ArenaCloud.user) return ArenaCloud.write(changes);return new Promise((resolve,reject)=>{const tx=db.transaction(['fighters','battles'],'readwrite');tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||Error('Save aborted.'));try{changes(tx);}catch(e){tx.abort();reject(e);}});}
 async function mutate(action){if(busy)throw Error('A save is already in progress.');busy=true;try{const run=async()=>{await load();await action();await load();channel?.postMessage('changed');};if(navigator.locks)await navigator.locks.request('multiverse-arena-write',run);else await run();}finally{busy=false;}}
 function query(){worker.postMessage({type:'query',seq:++seq,q:$('search').value.trim(),verse:$('verse').value,sort:$('sort').value,played:$('played').checked,page});}
 function renderRows(d){if(d.seq!==seq)return;resultCount=d.count;if(page>0&&page*50>=d.count){page=Math.max(0,Math.ceil(d.count/50)-1);query();return;}$('rows').innerHTML=d.rows.map(f=>'<tr><td class="rank '+(f.rank<=3?'top':'')+'">'+String(f.rank).padStart(2,'0')+'</td><td>'+person(f)+'</td><td class="muted">'+esc(f.verse)+'</td><td><span class="win">'+f.wins+'</span> <span class="muted">/</span> <span class="loss">'+f.losses+'</span></td><td>'+f.rate.toFixed(1)+'%</td><td>'+(f.ratio===Infinity?'∞':f.ratio.toFixed(2))+'</td><td>'+f.mmr+'</td></tr>').join('');$('empty').hidden=d.count>0;if(!fighters.length){$('empty').querySelector('h2').textContent='Your arena starts here.';$('empty').querySelector('p').textContent='Add your first combatant or import an entire roster.';$('emptyAdd').hidden=false;$('demo').hidden=false;}else{$('empty').querySelector('h2').textContent='No combatants found.';$('empty').querySelector('p').textContent='Try a different search or universe filter.';$('emptyAdd').hidden=true;$('demo').hidden=true;}$('resultCount').textContent=d.count?('Showing '+(page*50+1)+'–'+Math.min((page+1)*50,d.count)+' of '+d.count.toLocaleString()):'0 combatants';$('pageText').textContent=(page+1)+' / '+Math.max(1,Math.ceil(d.count/50));$('prev').disabled=page===0;$('next').disabled=(page+1)*50>=d.count;}
@@ -19,7 +40,7 @@ function modal(html){$('dialogBody').innerHTML=html;if(!$('dialog').open)$('dial
 function close(){$('dialog').close();}
 function formError(e){const error=$('formError');if(error)error.textContent=e.message||String(e);else toast(e.message||String(e));}
 function fighterForm(id){const f=byId.get(id);modal('<div class="eyebrow purple">COMBATANT FILE</div><h2>'+(f?'Edit combatant':'Add a new contender')+'</h2><form id="fighterForm"><label class="field">Name<input name="name" maxlength="120" required value="'+esc(f?.name||'')+'"></label><label class="field">Fictional universe<input name="verse" maxlength="120" required value="'+esc(f?.verse||'')+'" placeholder="e.g. Star Wars"></label><label class="field">Portrait URL (optional)<input name="image" type="url" maxlength="3000" value="'+esc(f?.image||'')+'" placeholder="https://…"></label><label class="field">Version, equipment or notes<textarea name="notes" maxlength="5000">'+esc(f?.notes||'')+'</textarea></label><p class="muted">New combatants start at 100 MMR. Ratings change through recorded battles.</p><p id="formError" class="error" role="alert"></p><div class="dialog-actions">'+(f?'<button class="button danger" type="button" id="deleteFighter">Delete</button>':'')+'<button class="button primary" type="submit">Save combatant</button></div></form>');
-$('fighterForm').onsubmit=async e=>{e.preventDefault();const button=e.submitter;button.disabled=true;try{const values=Object.fromEntries(new FormData(e.target)),next=Arena.fighter({...f,...values});await mutate(async()=>{if(id&&!byId.has(id))throw Error('This combatant was removed in another tab.');if(fighters.some(x=>x.id!==next.id&&x.name.toLowerCase()===next.name.toLowerCase()&&x.verse.toLowerCase()===next.verse.toLowerCase()))throw Error('That name already exists in this universe. Add a version to the name if needed.');await write(tx=>tx.objectStore('fighters').put(next));});close();toast('Combatant saved.');}catch(err){formError(err);}finally{button.disabled=false;}};
+$('fighterForm').onsubmit=async e=>{e.preventDefault();const button=e.submitter;button.disabled=true;try{const values=Object.fromEntries(new FormData(e.target)),next=Arena.fighter({...f,...values});await mutate(async()=>{if(id&&!byId.has(id))throw Error('This combatant was removed on another device.');if(id&&JSON.stringify(byId.get(id))!==JSON.stringify(f))throw Error('This profile changed on another device. Reopen it before editing.');if(fighters.some(x=>x.id!==next.id&&x.name.toLowerCase()===next.name.toLowerCase()&&x.verse.toLowerCase()===next.verse.toLowerCase()))throw Error('That name already exists in this universe. Add a version to the name if needed.');await write(tx=>tx.objectStore('fighters').put(next));});close();toast('Combatant saved.');}catch(err){formError(err);}finally{button.disabled=false;}};
 if(f)$('deleteFighter').onclick=async()=>{if(!confirm('Delete '+f.name+'? Combatants with battle records cannot be deleted.'))return;try{await mutate(async()=>{if(battles.some(b=>b.winner===id||b.loser===id))throw Error('This combatant has battle history. You can edit the profile instead.');await write(tx=>tx.objectStore('fighters').delete(id));});close();toast('Combatant deleted.');}catch(e){formError(e);}};}
 function battleForm(){if(fighters.length<2){toast('Add at least two combatants first.');return;}selected={winner:null,loser:null};modal('<div class="eyebrow purple">ENTER THE ARENA</div><h2>Record a battle</h2><p>Select the winner and loser, then choose how decisive the result was.</p><form id="battleForm">'+['winner','loser'].map(key=>'<label class="field">'+(key==='winner'?'Winner':'Loser')+'<input type="search" id="'+key+'Search" autocomplete="off" placeholder="Search name or universe…"></label><div class="picked" id="'+key+'Picked">No combatant selected</div><div class="picker-results" id="'+key+'Results"></div>').join('')+'<label class="field">Battle result<select name="result" id="battleResult"><option value="close">Hard-fought win (+10) / loss (−10)</option><option value="easy">Easy win (+20) / brutal loss (−20)</option></select></label><label class="field">Battle notes<textarea name="notes" maxlength="5000" placeholder="Location, conditions, equipment, how the fight ended…"></textarea></label><div class="notice">Both ratings update together. Negative MMR is allowed.</div><p id="formError" class="error" role="alert"></p><div class="dialog-actions"><button class="button primary" type="submit">Confirm & update rankings</button></div></form>');
 for(const key of ['winner','loser']){const input=$(key+'Search');const search=debounce(()=>worker.postMessage({type:'lookup',key,q:input.value.trim()}),120);input.oninput=()=>{selected[key]=null;$(key+'Picked').textContent='No combatant selected';search();};input.onfocus=()=>worker.postMessage({type:'lookup',key,q:input.value.trim()});}
@@ -41,12 +62,124 @@ $('search').oninput=debounce(()=>{page=0;query();},150);for(const id of ['verse'
 $('historySearch').oninput=debounce(()=>{historyPage=0;renderHistory();},150);$('showVoided').onchange=()=>{historyPage=0;renderHistory();};$('historyPrev').onclick=()=>{historyPage--;renderHistory();};$('historyNext').onclick=()=>{historyPage++;renderHistory();};
 document.addEventListener('click',async e=>{const b=e.target.closest('button');if(!b)return;try{if(b.dataset.profile)worker.postMessage({type:'profile',id:b.dataset.profile});if(b.dataset.edit)fighterForm(b.dataset.edit);if(b.dataset.pick){const key=b.dataset.key,f=byId.get(b.dataset.pick);if(!f)return;selected[key]=f.id;$(key+'Picked').textContent='Selected: '+f.name+' · '+f.verse;$(key+'Search').value=f.name;$(key+'Results').innerHTML='';}if(b.dataset.undo){if(!confirm('Undo this result? Both MMR changes and W/L counts will be reversed. The record stays in your archive marked as undone.'))return;await mutate(async()=>{const record=battles.find(x=>x.id===b.dataset.undo);if(!record||record.voided)throw Error('That result was already undone.');await write(tx=>tx.objectStore('battles').put({...record,voided:true}));});toast('Result undone. Rankings recalculated.');}}catch(err){toast(err.message);}});
 $('export').onclick=()=>exportBackup().catch(formError);
-$('restore').onclick=()=>chooseFile('.json,application/json',async text=>{const data=Arena.validate(JSON.parse(text));if(!confirm('Replace this browser’s entire archive with '+data.fighters.length+' combatants and '+data.battles.length+' battles? Export a backup first if you need to keep current data.'))return;await mutate(()=>write(tx=>{tx.objectStore('fighters').clear();tx.objectStore('battles').clear();data.fighters.forEach(f=>tx.objectStore('fighters').add(f));data.battles.forEach(b=>tx.objectStore('battles').add(b));}));page=0;historyPage=0;toast('Backup restored.');});
+$('restore').onclick=()=>chooseFile('.json,application/json',async text=>{const data=Arena.validate(JSON.parse(text));if(!confirm('Replace the currently open archive (including all devices signed into this account) with '+data.fighters.length+' combatants and '+data.battles.length+' battles? Export a backup first if you need to keep current data.'))return;await mutate(()=>write(tx=>{tx.objectStore('fighters').clear();tx.objectStore('battles').clear();data.fighters.forEach(f=>tx.objectStore('fighters').add(f));data.battles.forEach(b=>tx.objectStore('battles').add(b));}));page=0;historyPage=0;toast('Backup restored.');});
 $('csvImport').onclick=()=>chooseFile('.csv,text/csv',csvImport);
 $('template').onclick=()=>download('arena-roster-template.csv','name,verse,image,notes\nDarth Vader,Star Wars,,Original trilogy\nMaster Chief,Halo,,Standard equipment\n','text/csv');
 $('csvExport').onclick=async()=>{try{await load();const rows=Arena.rank(Arena.stats(fighters,battles));download('arena-leaderboard.csv','rank,name,verse,wins,losses,win_percentage,wl_ratio,mmr,image,notes\r\n'+rows.map(f=>[f.rank,f.name,f.verse,f.wins,f.losses,f.rate.toFixed(2),f.ratio===Infinity?'Infinity':f.ratio.toFixed(2),f.mmr,f.image,f.notes].map(csvCell).join(',')).join('\r\n'),'text/csv');}catch(e){formError(e);}};
 $('demo').onclick=async()=>{try{await mutate(async()=>{if(fighters.length)throw Error('Starter roster is only available for an empty archive.');const names=[['Darth Vader','Star Wars'],['Master Chief','Halo'],['Gandalf','The Lord of the Rings'],['Batman','DC'],['Spider-Man','Marvel'],['Kratos','God of War'],['Geralt of Rivia','The Witcher'],['Goku','Dragon Ball']];await write(tx=>names.forEach(([name,verse])=>tx.objectStore('fighters').add(Arena.fighter({name,verse,notes:'Starter entry — add the specific version, equipment and portrait you want to use.'}))));});toast('8 starter characters added. All begin at 100 MMR.');}catch(e){formError(e);}};
 $('persist').onclick=async()=>{try{toast(await navigator.storage?.persist?.()?'Persistent storage granted. Keep exporting backups too.':'Persistent storage was not granted by this browser. Keep regular backups.');}catch(e){toast(e.message);}};
 }
-async function start(){try{worker=new Worker('worker.js');worker.onerror=()=>toast('Ranking worker failed to load. Reload the site; make sure worker.js and core.js are deployed.');worker.onmessage=({data:d})=>{if(d.type==='ready'){const v=$('verse').value;$('total').textContent=d.total.toLocaleString();$('battleCount').textContent=d.battles.toLocaleString();$('verseCount').textContent=d.verses.length.toLocaleString();$('verse').innerHTML='<option value="">All universes</option>'+d.verses.map(v=>'<option value="'+esc(v)+'">'+esc(v)+'</option>').join('');$('verse').value=d.verses.includes(v)?v:'';query();}if(d.type==='results')renderRows(d);if(d.type==='lookup')lookup(d);if(d.type==='profile')profile(d.fighter);};await openDB();wire();backupLabel();await load();if(channel)channel.onmessage=()=>load().catch(e=>toast(e.message));document.addEventListener('visibilitychange',()=>{if(!document.hidden)load().catch(e=>toast(e.message));});}catch(e){$('resultCount').textContent='Archive unavailable';$('empty').hidden=false;$('empty').innerHTML='<h2>Could not open your archive.</h2><p>'+esc(e.message)+'</p><p>Allow browser storage and reload the page. Your existing data has not been deleted.</p>';toast('Storage could not be opened.');}}
+async function start(){try{worker=new Worker('worker.js');worker.onerror=()=>toast('Ranking worker failed to load. Reload the site; make sure worker.js and core.js are deployed.');worker.onmessage=({data:d})=>{if(d.type==='ready'){const v=$('verse').value;$('total').textContent=d.total.toLocaleString();$('battleCount').textContent=d.battles.toLocaleString();$('verseCount').textContent=d.verses.length.toLocaleString();$('verse').innerHTML='<option value="">All universes</option>'+d.verses.map(v=>'<option value="'+esc(v)+'">'+esc(v)+'</option>').join('');$('verse').value=d.verses.includes(v)?v:'';query();}if(d.type==='results')renderRows(d);if(d.type==='lookup')lookup(d);if(d.type==='profile')profile(d.fighter);};await openDB();
+wire();
+wireCloud();
+backupLabel();
+try {
+  await ArenaCloud.init(() => {
+    close();
+    fighters = [];
+    battles = [];
+    byId = new Map();
+    worker.postMessage({ type: 'data', fighters, battles });
+    renderHistory();
+    refreshCloud();
+  });
+} catch (error) {
+  updateCloudStatus(error.message);
+  toast(error.message);
+}
+await refreshCloud();
+if (channel) channel.onmessage = () => { if (!busy) refreshCloud(); };
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && !busy) refreshCloud();
+});
+window.addEventListener('online', () => { if (!busy) refreshCloud(); });
+setInterval(() => {
+  if (ArenaCloud.user && !document.hidden && !busy) refreshCloud();
+}, 30000);}catch(e){$('resultCount').textContent='Archive unavailable';$('empty').hidden=false;$('empty').innerHTML='<h2>Could not open your archive.</h2><p>'+esc(e.message)+'</p><p>Allow browser storage and reload the page. Your existing data has not been deleted.</p>';toast('Storage could not be opened.');}}
+function updateCloudStatus(message) {
+  $('cloudStatus').textContent = message;
+  $('accountLabel').textContent = ArenaCloud.user ? ArenaCloud.user.email : 'Device archive';
+  $('signInButton').hidden = !!ArenaCloud.user;
+  $('signOutButton').hidden = !ArenaCloud.user;
+  $('migrateLocal').hidden = !ArenaCloud.user;
+  $('archiveMode').textContent = ArenaCloud.user ? 'CLOUD ARCHIVE' : 'DEVICE ARCHIVE';
+}
+
+async function refreshCloud() {
+  try {
+    await load();
+  } catch (error) {
+    updateCloudStatus(error.message + ' Existing data remains available through your backups.');
+    toast(error.message);
+  }
+}
+
+function signInForm() {
+  modal(
+    '<h2>Sign in to your archive</h2>' +
+    '<p>Use the same account on your phone and PC. Your device archive can be transferred after signing in.</p>' +
+    '<form id="signInForm">' +
+    '<label class="field">Email<input name="email" type="email" autocomplete="username" required></label>' +
+    '<label class="field">Password<input name="password" type="password" autocomplete="current-password" required></label>' +
+    '<p id="formError" class="error" role="alert"></p>' +
+    '<div class="dialog-actions"><button class="button primary" type="submit">Sign in</button></div></form>'
+  );
+  $('signInForm').onsubmit = async event => {
+    event.preventDefault();
+    event.submitter.disabled = true;
+    try {
+      if (busy) throw new Error('Wait for the current save to finish.');
+      const values = new FormData(event.target);
+      await ArenaCloud.signIn(values.get('email').trim(), values.get('password'));
+      close();
+    } catch (error) {
+      formError(error);
+      event.submitter.disabled = false;
+    }
+  };
+}
+
+function wireCloud() {
+  $('signInButton').onclick = signInForm;
+  $('syncNow').onclick = () => { if (!busy) refreshCloud(); };
+  $('signOutButton').onclick = async () => {
+    try {
+      if (busy) throw new Error('Wait for the current save to finish.');
+      await ArenaCloud.signOut();
+    } catch (error) {
+      toast(error.message);
+    }
+  };
+  $('exportLocal').onclick = async () => {
+    try {
+      const local = await readLocalArchive();
+      download('arena-device-backup.json', JSON.stringify({ version: 1, ...local }), 'application/json');
+    } catch (error) {
+      toast(error.message);
+    }
+  };
+  $('migrateLocal').onclick = async () => {
+    try {
+      if (!ArenaCloud.user) throw new Error('Sign in first.');
+      const local = Arena.validate({ version: 1, ...await readLocalArchive() });
+      if (!local.fighters.length && !local.battles.length) throw new Error('This device archive is empty.');
+      if (!confirm('Upload ' + local.fighters.length + ' combatants and ' + local.battles.length +
+        ' battles to your empty cloud archive? Your device copy will also be retained.')) return;
+      await mutate(async () => {
+        if (!ArenaCloud.user) throw new Error('Sign in first.');
+        if (fighters.length || battles.length) {
+          throw new Error('The cloud archive already contains records. Export both archives before choosing a backup to restore.');
+        }
+        await write(transaction => {
+          for (const fighter of local.fighters) transaction.objectStore('fighters').add(fighter);
+          for (const battle of local.battles) transaction.objectStore('battles').add(battle);
+        });
+      });
+      toast('Device archive uploaded. Sign in with the same account on your other device.');
+    } catch (error) {
+      toast(error.message);
+    }
+  };
+}
+
 start();

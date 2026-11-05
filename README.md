@@ -1,12 +1,20 @@
 # Multiverse Arena
-A lightweight fictional-character battle archive for GitHub Pages. No build step or paid services.
+A lightweight fictional-character battle archive for GitHub Pages. No build step. Supports Supabase cloud saves within your project’s plan limits.
 
 ## Publish
-In this repository, open **Settings → Pages → Build and deployment → Source → GitHub Actions**.
-The **Check and publish Arena** workflow tests and publishes the site. If the initial deployment runs before Pages is enabled, enable it, then rerun the workflow from Actions.
-Expected address after a successful deployment: https://360Signs.github.io/Fictional/
+Use **Settings → Pages → Deploy from a branch → main → /(root)**.
+The built-in GitHub Pages workflow publishes changes. The Check Arena workflow runs verification.
 
-Alternatively, use **Deploy from a branch → main → /(root)**. The five website files already live at the repository root; the Actions deployment job is not needed for this mode.
+## Cloud setup
+1. In your Supabase project, open SQL Editor, create a query, paste the contents of [supabase-setup.sql](supabase-setup.sql), and click Run.
+2. Open Authentication → Users → Add user → Create new user. Enter your email and a password you choose. Enable Auto Confirm User if offered.
+3. Open the Arena website, go to Data & settings, and sign in using that account.
+4. On the device with your original data, export a device backup, then click Upload this device’s archive. The cloud account must be empty.
+5. Sign in with the same email and password on your phone.
+
+The URL and publishable key in cloud.js identify the Supabase project. SQL setup requires project-owner access. Keep passwords, service-role keys and secret keys out of this repository.
+
+Each signed-in account has a private archive. Other registered users cannot access it. Signed-out mode opens the original local archive. Signing out retains that original device archive, which may be older than your cloud records. Export a cloud backup while signed in when needed.
 
 ## Use
 - Add combatants individually or import CSV. All start at 100 MMR.
@@ -28,9 +36,11 @@ Negative MMR is permitted without a minimum. This is a fixed-points system, not 
 Ties sort by wins, name, then ID. Unbeaten fighters with at least one win show an infinite W/L ratio. Unplayed fighters show 0.00 and 0% win rate.
 
 ## Data storage
-**This version stores records in your browser's IndexedDB, not on GitHub or in a shared database.** Other visitors get their own separate archives. Another device or browser will not see your records automatically. Clearing browser storage can remove the archive. Export regular JSON backups; a CSV leaderboard export is not a full backup.
-The storage URL matters: moving the site to a different domain or browser profile creates a separate archive. Private browsing may delete data when closed.
-No passwords, API secrets or account sign-in are needed. GitHub holds the public source code, not your browser's roster. Cross-device live sync requires a separately configured database and authentication.
+Signed-in edits save to Supabase through atomic RPCs. Every save checks the archive revision, and stale writes fail with a refresh prompt. Retried requests reuse an ID to prevent duplicate application. Read and write functions derive the account from the authenticated session. Direct table access is revoked and Row Level Security is enabled.
+
+Cloud editing requires an internet connection. Changes are checked every 30 seconds while the tab is visible, when returning to the tab, and before saves. Unchanged reads return only the revision. Changed reads download the complete text archive. Save requests upload changed records only. Large initial archives and large imports can still take time.
+
+Existing IndexedDB archives remain available while signed out. The migration button only uploads into an empty cloud account and retains the original device copy. JSON restore replaces the currently open archive and, when signed in, affects all devices using the account. Export backups regularly.
 
 ## Performance design
 - Ranking/search/filtering run in a dedicated web worker.
@@ -61,4 +71,5 @@ Run checks with Node 22: `node tests.cjs`.
 Serve over HTTP/HTTPS; directly opening index.html as a file is not supported because workers and storage require a consistent web origin.
 
 ## Verification limits
+Cloud adapter and PostgreSQL regression tests cover retries, conflicting writes, account isolation, anonymous access, migration transactions and restore. Live project setup and sign-in must also be verified after applying the SQL.
 Syntax and scoring tests were run during creation. CI covers rules, negative scores, undo, CSV, validation, worker ranking, search and pagination. Browser interactions and device-specific IndexedDB behavior still require a browser smoke test after deployment.
