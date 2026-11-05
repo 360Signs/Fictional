@@ -1,0 +1,17 @@
+/* Shared scoring, import validation, and ranking logic. */
+(function(root){
+'use strict';
+const RULES={close:{label:'Hard-fought victory',win:10,loss:-10},easy:{label:'Easy victory',win:20,loss:-20}};
+function stats(fighters,battles){
+ const map=new Map(fighters.map(f=>[f.id,{...f,mmr:100,wins:0,losses:0,streak:0}]));
+ for(const b of battles){if(b.voided)continue;const w=map.get(b.winner),l=map.get(b.loser),r=RULES[b.result];if(!w||!l||!r)continue;
+ w.mmr+=r.win;l.mmr+=r.loss;w.wins++;l.losses++;w.streak=Math.max(0,w.streak)+1;l.streak=Math.min(0,l.streak)-1;}
+ return [...map.values()].map(f=>({...f,played:f.wins+f.losses,rate:f.wins+f.losses?f.wins/(f.wins+f.losses)*100:0,ratio:f.losses?f.wins/f.losses:f.wins?Infinity:0}));
+}
+function rank(rows){return [...rows].sort((a,b)=>b.mmr-a.mmr||b.wins-a.wins||a.name.localeCompare(b.name)||a.id.localeCompare(b.id)).map((x,i)=>({...x,rank:i+1}));}
+function imageURL(s){if(!s)return '';if(s.length>3000)throw Error('Image URL is too long.');let u;try{u=new URL(s);}catch{throw Error('Use a complete https:// image URL.');}if(u.protocol!=='https:')throw Error('Image URLs must use HTTPS.');return u.href;}
+function fighter(x){if(!x||typeof x.name!=='string'||!x.name.trim()||x.name.length>120||typeof x.verse!=='string'||!x.verse.trim()||x.verse.length>120)throw Error('Each combatant needs a name and universe (up to 120 characters).');return {id:typeof x.id==='string'&&x.id.length<=100?x.id:crypto.randomUUID(),name:x.name.trim(),verse:x.verse.trim(),image:imageURL(x.image||''),notes:typeof x.notes==='string'?x.notes.slice(0,5000):'',createdAt:typeof x.createdAt==='string'?x.createdAt:new Date().toISOString()};}
+function validate(data){if(!data||data.version!==1||!Array.isArray(data.fighters)||!Array.isArray(data.battles))throw Error('Not a Multiverse Arena version 1 backup.');if(data.fighters.length>100000||data.battles.length>1000000)throw Error('Backup exceeds supported import limits.');const fighters=data.fighters.map(fighter),ids=new Set(fighters.map(f=>f.id));if(ids.size!==fighters.length)throw Error('Duplicate combatant IDs.');const bids=new Set();const battles=data.battles.map(b=>{if(!b||typeof b.id!=='string'||bids.has(b.id)||!ids.has(b.winner)||!ids.has(b.loser)||b.winner===b.loser||!RULES[b.result]||!Number.isFinite(Date.parse(b.date)))throw Error('Invalid battle record.');bids.add(b.id);return {id:b.id,winner:b.winner,loser:b.loser,result:b.result,date:b.date,notes:typeof b.notes==='string'?b.notes.slice(0,5000):'',voided:!!b.voided};});return {fighters,battles};}
+function csv(text){const rows=[];let row=[],cell='',quoted=false;for(let i=0;i<text.length;i++){const c=text[i];if(c==='"'){if(quoted&&text[i+1]==='"'){cell+='"';i++;}else quoted=!quoted;}else if(c===','&&!quoted){row.push(cell);cell='';}else if((c==='\n'||c==='\r')&&!quoted){if(c==='\r'&&text[i+1]==='\n')i++;row.push(cell);if(row.some(x=>x.trim()))rows.push(row);row=[];cell='';}else cell+=c;}if(quoted)throw Error('Unclosed CSV quote.');row.push(cell);if(row.some(x=>x.trim()))rows.push(row);if(!rows.length)throw Error('CSV is empty.');const head=rows.shift().map(s=>s.replace(/^\uFEFF/,'').trim().toLowerCase());if(!head.includes('name')||!head.includes('verse'))throw Error('CSV headers must include name,verse. Optional: image,notes.');return rows.map(r=>fighter(Object.fromEntries(head.map((h,i)=>[h,r[i]||'']))));}
+root.Arena={RULES,stats,rank,validate,fighter,csv,imageURL};
+})(typeof self!=='undefined'?self:globalThis);
